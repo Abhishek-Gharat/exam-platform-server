@@ -37,6 +37,11 @@ app.use(function(err, req, res, next) {
     res.status(500).json({ message: 'Internal server error' });
 });
 
+// Start Telegram bot
+if (process.env.TELEGRAM_BOT_TOKEN) {
+  require('./routes/telegram');
+}
+
 app.listen(config.port, function() {
     console.log('Server running on port ' + config.port);
 });
