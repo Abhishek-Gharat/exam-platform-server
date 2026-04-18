@@ -24,14 +24,19 @@ bot.onText(/\/start/, (msg) => {
   }
   bot.sendMessage(msg.chat.id,
     `🎓 *Exam Platform Bot*\n\n` +
-    `📊 /stats - Dashboard stats\n` +
-    `📝 /exams - List exams\n` +
-    `👨‍🎓 /students - List students\n` +
-    `📋 /results - Recent results\n` +
-    `🤖 /createexam <topic> - AI generate exam\n` +
-    `✅ /publishexam <id> - Publish exam\n` +
-    `📝 /unpublish <id> - Unpublish exam\n` +
-    `🆔 /chatid - Get your chat ID`,
+    `📊 /stats — Dashboard stats\n` +
+    `📝 /exams — List all exams\n` +
+    `👨‍🎓 /students — List students\n` +
+    `📋 /results — Recent results\n` +
+    `🤖 /createexam <topic> [count] — AI generate exam\n` +
+    `   Example: /createexam JavaScript Basics 10\n` +
+    `   Default: 5 questions if no count given\n` +
+    `✅ /publishexam <id> — Publish exam\n` +
+    `📝 /unpublish <id> — Unpublish exam\n` +
+    `🗑 /deleteexam <id> — Delete exam\n` +
+    `❓ /examdetails <id> — View exam questions\n` +
+    `🏆 /leaderboard — Top students\n` +
+    `🆔 /chatid — Get your chat ID`,
     { parse_mode: 'Markdown' }
   );
 });
@@ -51,13 +56,29 @@ bot.onText(/\/stats/, async (msg) => {
     const attempts = await db.query('SELECT COUNT(*) FROM attempts WHERE status = \$1', ['COMPLETED']);
     const questions = await db.query('SELECT COUNT(*) FROM questions');
 
+    // Average score
+    const avgScore = await db.query(
+      `SELECT ROUND(AVG(CASE WHEN max_score > 0 THEN (score::float / max_score) * 100 ELSE 0 END)) as avg
+       FROM attempts WHERE status = 'COMPLETED'`
+    );
+    const avg = avgScore.rows[0].avg || 0;
+
+    // Pass rate
+    const passRate = await db.query(
+      `SELECT ROUND(AVG(CASE WHEN passed THEN 100 ELSE 0 END)) as rate
+       FROM attempts WHERE status = 'COMPLETED'`
+    );
+    const rate = passRate.rows[0].rate || 0;
+
     bot.sendMessage(msg.chat.id,
       `📊 *Dashboard Stats*\n\n` +
       `👨‍🎓 Students: ${users.rows[0].count}\n` +
       `📝 Total Exams: ${exams.rows[0].count}\n` +
       `✅ Published: ${published.rows[0].count}\n` +
       `📋 Completed Attempts: ${attempts.rows[0].count}\n` +
-      `❓ Questions: ${questions.rows[0].count}`,
+      `❓ Questions in Bank: ${questions.rows[0].count}\n` +
+      `🎯 Avg Score: ${avg}%\n` +
+      `✅ Pass Rate: ${rate}%`,
       { parse_mode: 'Markdown' }
     );
   } catch (err) {
@@ -122,7 +143,39 @@ bot.onText(/\/results/, async (msg) => {
     let text = '📊 *Recent Results:*\n\n';
     result.rows.forEach((r, i) => {
       const icon = r.passed ? '✅' : '❌';
-      text += `${i + 1}. ${r.name}\n   📝 ${r.exam_title}\n   🎯 Score: ${r.score}/${r.max_score} ${icon}\n\n`;
+      const pct = r.max_score > 0 ? Math.round((r.score / r.max_score) * 100) : 0;
+      text += `${i + 1}. ${r.name}\n   📝 ${r.exam_title}\n   🎯 ${r.score}/${r.max_score} (${pct}%) ${icon}\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /leaderboard
+bot.onText(/\/leaderboard/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const result = await db.query(`
+      SELECT u.name, u.email,
+        COUNT(a.id) as total_exams,
+        ROUND(AVG(CASE WHEN a.max_score > 0 THEN (a.score::float / a.max_score) * 100 ELSE 0 END)) as avg_score,
+        SUM(CASE WHEN a.passed THEN 1 ELSE 0 END) as passed_count
+      FROM users u
+      JOIN attempts a ON u.id = a.user_id
+      WHERE a.status = 'COMPLETED' AND u.role = 'STUDENT'
+      GROUP BY u.id, u.name, u.email
+      ORDER BY avg_score DESC
+      LIMIT 10
+    `);
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '🏆 No results yet');
+    }
+    let text = '🏆 *Leaderboard (Top Students):*\n\n';
+    const medals = ['🥇', '🥈', '🥉'];
+    result.rows.forEach((s, i) => {
+      const medal = medals[i] || `${i + 1}.`;
+      text += `${medal} *${s.name}*\n   📧 ${s.email}\n   🎯 Avg: ${s.avg_score}% | Exams: ${s.total_exams} | Passed: ${s.passed_count}\n\n`;
     });
     bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
   } catch (err) {
@@ -136,13 +189,16 @@ bot.onText(/\/publishexam (.+)/, async (msg, match) => {
   const searchId = match[1].trim();
   try {
     const result = await db.query(
-      'UPDATE exams SET status = \$1, updated_at = NOW() WHERE id::text LIKE \$2 RETURNING title, id',
+      'UPDATE exams SET status = \$1, updated_at = NOW() WHERE id::text LIKE \$2 RETURNING title, id, total_questions',
       ['PUBLISHED', searchId + '%']
     );
     if (result.rows.length === 0) {
       return bot.sendMessage(msg.chat.id, '❌ Exam not found with ID: ' + searchId);
     }
-    bot.sendMessage(msg.chat.id, `✅ *Published:* ${result.rows[0].title}`, { parse_mode: 'Markdown' });
+    bot.sendMessage(msg.chat.id,
+      `✅ *Published!*\n\n📝 ${result.rows[0].title}\n❓ ${result.rows[0].total_questions} questions\n🔗 Students can now see this exam`,
+      { parse_mode: 'Markdown' }
+    );
   } catch (err) {
     bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
   }
@@ -166,52 +222,167 @@ bot.onText(/\/unpublish (.+)/, async (msg, match) => {
   }
 });
 
-// /createexam <topic>
+// /deleteexam <id>
+bot.onText(/\/deleteexam (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    // First get exam info
+    const exam = await db.query('SELECT id, title, question_ids FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
+    if (exam.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found with ID: ' + searchId);
+    }
+
+    const examId = exam.rows[0].id;
+    const title = exam.rows[0].title;
+
+    // Delete attempts for this exam
+    await db.query('DELETE FROM attempts WHERE exam_id = \$1', [examId]);
+    // Delete the exam
+    await db.query('DELETE FROM exams WHERE id = \$1', [examId]);
+
+    bot.sendMessage(msg.chat.id, `🗑 *Deleted:* ${title}\n(Attempts also removed)`, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /examdetails <id>
+bot.onText(/\/examdetails (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    const exam = await db.query('SELECT * FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
+    if (exam.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found');
+    }
+    const e = exam.rows[0];
+    const qIds = e.question_ids || [];
+
+    let text = `📝 *${e.title}*\n\n` +
+      `📋 Status: ${e.status}\n` +
+      `❓ Questions: ${e.total_questions}\n` +
+      `⏱ Time: ${Math.round(e.time_limit_secs / 60)} min\n` +
+      `🎯 Pass: ${e.passing_score}%\n` +
+      `📊 Attempts: ${e.total_attempts}\n\n`;
+
+    if (qIds.length > 0) {
+      const questions = await db.query('SELECT type, title, difficulty, content FROM questions WHERE id = ANY(\$1)', [qIds]);
+      text += `*Questions:*\n\n`;
+      questions.rows.forEach((q, i) => {
+        const typeIcon = q.type === 'MCQ' ? '🔵' : q.type === 'WRITE_CODE' ? '🟡' : '🟢';
+        const preview = (q.title || q.content || '').substring(0, 60);
+        text += `${i + 1}. ${typeIcon} [${q.type}] ${q.difficulty}\n   ${preview}...\n\n`;
+      });
+    } else {
+      text += '⚠️ No questions linked';
+    }
+
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /createexam <topic> [count]
+// Examples: /createexam JavaScript Basics
+//           /createexam JavaScript Basics 10
+//           /createexam Python OOP 15
 bot.onText(/\/createexam (.+)/, async (msg, match) => {
   if (!isAdmin(msg.chat.id)) return;
-  const topic = match[1].trim();
-  bot.sendMessage(msg.chat.id, `🤖 Generating exam on *"${topic}"*...\n⏳ This takes 30-60 seconds`, { parse_mode: 'Markdown' });
+
+  const input = match[1].trim();
+
+  // Parse count from end of input (last word if it's a number)
+  let topic = input;
+  let count = 5; // default
+  const words = input.split(/\s+/);
+  const lastWord = words[words.length - 1];
+
+  if (/^\d+$/.test(lastWord)) {
+    count = Math.min(Math.max(parseInt(lastWord), 1), 20); // clamp 1-20
+    topic = words.slice(0, -1).join(' ');
+  }
+
+  // Also remove trailing "questions" or "qs" word
+  topic = topic.replace(/\s+(questions?|qs)$/i, '').trim();
+
+  if (!topic) {
+    return bot.sendMessage(msg.chat.id, '❌ Please provide a topic.\nExample: `/createexam JavaScript Basics 10`', { parse_mode: 'Markdown' });
+  }
+
+  bot.sendMessage(msg.chat.id,
+    `🤖 Generating exam on *"${topic}"*...\n` +
+    `❓ ${count} questions\n` +
+    `⏳ This takes 30-60 seconds`,
+    { parse_mode: 'Markdown' }
+  );
 
   try {
     const aiService = require('../services/aiService');
     const questions = await aiService.generateQuestions({
       topic: topic,
-      count: 10,
+      count: count,
       difficulty: 'MIXED',
       types: ['MCQ', 'WRITE_CODE', 'EXPLAIN_ME']
     });
 
-    const questionIds = [];
-    for (const q of questions) {
-      const result = await db.query(
-        `INSERT INTO questions (type, title, topic, difficulty, content, options, correct_option, explanation, model_answer, starter_code, expected_output, points)
-         VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12) RETURNING id`,
-        [
-          q.type,
-          q.title || q.content.substring(0, 100),
-          topic,
-          q.difficulty || 'MEDIUM',
-          q.content,
-          JSON.stringify(q.options || []),
-          q.correct_option,
-          q.explanation,
-          q.model_answer,
-          q.starter_code,
-          q.expected_output,
-          q.points || 10
-        ]
-      );
-      questionIds.push(result.rows[0].id);
+    console.log(`[Telegram] AI returned ${questions.length} questions`);
+
+    if (!questions || questions.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ AI returned no questions. Try again or use a different topic.');
     }
+
+    const questionIds = [];
+    let inserted = 0;
+    let failed = 0;
+
+    for (const q of questions) {
+      try {
+        const result = await db.query(
+          `INSERT INTO questions (type, title, topic, difficulty, content, options, correct_option, explanation, model_answer, starter_code, expected_output, points)
+           VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12) RETURNING id`,
+          [
+            q.type || 'MCQ',
+            q.title || (q.content || '').substring(0, 100),
+            topic,
+            q.difficulty || 'MEDIUM',
+            q.content || '',
+            JSON.stringify(q.options || []),
+            q.correct_option != null ? q.correct_option : null,
+            q.explanation || '',
+            q.model_answer || '',
+            q.starter_code || '',
+            q.expected_output || '',
+            q.points || 10
+          ]
+        );
+        questionIds.push(result.rows[0].id);
+        inserted++;
+      } catch (insertErr) {
+        console.error(`[Telegram] Failed to insert question:`, insertErr.message);
+        failed++;
+      }
+    }
+
+    console.log(`[Telegram] Inserted ${inserted} questions, failed ${failed}`);
+
+    if (questionIds.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ AI generated questions but all failed to save. Check logs.');
+    }
+
+    // Calculate time limit: 2 min per MCQ, 3 min per code/explain
+    const timePerQ = 2 * 60; // 2 minutes per question
+    const timeLimitSecs = Math.max(questionIds.length * timePerQ, 600); // minimum 10 min
 
     const examResult = await db.query(
       `INSERT INTO exams (title, description, status, time_limit_secs, total_questions, passing_score, question_ids)
        VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7) RETURNING id, title`,
       [
         `${topic} Exam`,
-        `AI-generated exam on ${topic}`,
+        `AI-generated exam on ${topic} with ${questionIds.length} questions`,
         'DRAFT',
-        1800,
+        timeLimitSecs,
         questionIds.length,
         60,
         JSON.stringify(questionIds)
@@ -219,17 +390,36 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
     );
 
     const shortId = examResult.rows[0].id.substring(0, 8);
-    bot.sendMessage(msg.chat.id,
+    const timeMin = Math.round(timeLimitSecs / 60);
+
+    // Count question types
+    const typeCounts = {};
+    questions.forEach(q => {
+      const t = q.type || 'MCQ';
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    const typeStr = Object.entries(typeCounts).map(([k, v]) => `${k}: ${v}`).join(', ');
+
+    let resultMsg =
       `✅ *Exam Created!*\n\n` +
       `📝 ${examResult.rows[0].title}\n` +
       `❓ ${questionIds.length} questions\n` +
-      `⏱ 30 minutes\n` +
+      `📊 Types: ${typeStr}\n` +
+      `⏱ ${timeMin} minutes\n` +
+      `🎯 Pass: 60%\n` +
       `📋 Status: DRAFT\n` +
       `🆔 ID: \`${shortId}\`\n\n` +
-      `To publish: /publishexam ${shortId}`,
-      { parse_mode: 'Markdown' }
-    );
+      `To publish: /publishexam ${shortId}\n` +
+      `To view: /examdetails ${shortId}\n` +
+      `To delete: /deleteexam ${shortId}`;
+
+    if (failed > 0) {
+      resultMsg += `\n\n⚠️ ${failed} questions failed to save`;
+    }
+
+    bot.sendMessage(msg.chat.id, resultMsg, { parse_mode: 'Markdown' });
   } catch (err) {
+    console.error('[Telegram] createexam error:', err);
     bot.sendMessage(msg.chat.id, '❌ Failed: ' + err.message);
   }
 });
