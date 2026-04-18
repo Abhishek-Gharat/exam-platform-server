@@ -1,436 +1,426 @@
-// server/src/services/aiService.js
-const axios = require('axios');
-const config = require('../config');
+const TelegramBot = require('node-telegram-bot-api');
+const db = require('../db');
 
-class AIService {
-  constructor() {
-    this.apiKey = config.openRouter.apiKey;
-    this.baseUrl = config.openRouter.baseUrl;
-    this.model = config.openRouter.model;
-  }
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
 
-  /**
-   * Grade an EXPLAIN_ME answer using AI
-   */
-  async gradeExplainAnswer(question, userAnswer) {
-    try {
-      if (!userAnswer || userAnswer.trim().length < 10) {
-        return { score: 0, feedback: 'Answer is too short or empty to evaluate.' };
-      }
-
-      var prompt = `You are a fair exam grader for a JavaScript programming course.
-
-QUESTION:
-${question.content}
-
-MODEL ANSWER (the ideal/correct answer):
-${question.model_answer}
-
-STUDENT'S ANSWER:
-${userAnswer}
-
-MAXIMUM POINTS: ${question.points}
-
-GRADING CRITERIA:
-1. **Accuracy (40%)** - Are the key technical concepts correct?
-2. **Completeness (30%)** - Are all major points from the model answer covered?
-3. **Understanding (20%)** - Does the student demonstrate genuine understanding?
-4. **Clarity (10%)** - Is the answer well-written and clear?
-
-SCORING GUIDE:
-- 90-100% points: Excellent answer covering all key concepts accurately
-- 70-89% points: Good answer covering most key concepts with minor gaps
-- 50-69% points: Decent answer covering core concept but missing several points
-- 30-49% points: Partial answer with some correct ideas but significant gaps
-- 10-29% points: Minimal relevant content, mostly incomplete
-- 0 points: ONLY for gibberish, completely irrelevant, empty, or nonsense answers
-
-IMPORTANT:
-- If the student explains the core concept correctly, they deserve at LEAST 50% points
-- Shorter but accurate answers should still get good scores
-- Don't penalize for not using exact same words as model answer
-- Focus on whether the student UNDERSTANDS the concept
-- Gibberish like "what isi teh" or random characters = 0 points
-- Copying the question back without answering = 0 points
-
-Respond in EXACTLY this JSON format (no extra text):
-{
-  "score": <integer between 0 and ${question.points}>,
-  "feedback": "<brief 1-2 sentence explanation of why this score was given>"
-}`;
-
-      var response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: this.model,
-          messages: [
-            { role: 'system', content: 'You are a fair but thorough exam grader. Grade based on understanding, not exact wording. Always respond with valid JSON only. No markdown, no extra text.' },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.2,
-          max_tokens: 200,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: 30000,
-        }
-      );
-
-      var text = response.data?.choices?.[0]?.message?.content?.trim();
-      console.log('AI Grading raw response:', text);
-
-      if (!text) return { score: 0, feedback: 'Could not evaluate answer.' };
-
-      var jsonMatch = text.match(/\{[\s\S]*?\}/);
-      if (jsonMatch) {
-        var result = JSON.parse(jsonMatch[0]);
-        var score = Math.min(Math.max(0, Math.round(result.score)), question.points);
-        return { score: score, feedback: result.feedback || 'Graded by AI.' };
-      }
-
-      return { score: 0, feedback: 'Could not evaluate answer.' };
-    } catch (error) {
-      console.error('AI grading error:', error.message);
-      return { score: 0, feedback: 'Grading error — please contact admin.' };
-    }
-  }
-
-  /**
-   * Build the prompt for question generation
-   */
-  buildPrompt({ topic, difficulty, mcqCount, codeCount, explainCount }) {
-    const totalQuestions = (mcqCount || 0) + (codeCount || 0) + (explainCount || 0);
-
-    let prompt = `You are an expert exam question generator for a JavaScript/programming exam platform.
-
-Generate exactly ${totalQuestions} questions about "${topic}" at ${difficulty} difficulty level.
-
-Return ONLY a valid JSON array (no markdown, no explanation, no code fences). Each element must be an object.
-
-`;
-
-    if (mcqCount > 0) {
-      prompt += `
-Generate ${mcqCount} MCQ (multiple-choice) questions about concepts/theory. Each MCQ object must have:
-{
-  "type": "MCQ",
-  "title": "Short question title",
-  "topic": "${topic}",
-  "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "${difficulty.toLowerCase()}"],
-  "points": ${difficulty === 'EASY' ? 5 : difficulty === 'MEDIUM' ? 10 : 15},
-  "content": "The full question text",
-  "options": [
-    {"label": "A", "text": "First option"},
-    {"label": "B", "text": "Second option"},
-    {"label": "C", "text": "Third option"},
-    {"label": "D", "text": "Fourth option"}
-  ],
-  "correct_option": <0|1|2|3>,
-  "explanation": "Detailed explanation of why the correct answer is right"
+if (!TELEGRAM_TOKEN) {
+  console.log('No Telegram token found, bot disabled');
+  module.exports = null;
+  return;
 }
-IMPORTANT: correct_option is a 0-based INTEGER index (0=A, 1=B, 2=C, 3=D).
-`;
-    }
 
-    if (codeCount > 0) {
-      prompt += `
-Generate ${codeCount} WRITE_CODE (output prediction) questions. Show a JavaScript code snippet and ask "What will be the output?". Student picks from 4 options.
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
+console.log('Telegram bot started');
 
-Each WRITE_CODE object must have:
-{
-  "type": "WRITE_CODE",
-  "title": "Short title about the concept tested",
-  "topic": "${topic}",
-  "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "coding", "${difficulty.toLowerCase()}"],
-  "points": ${difficulty === 'EASY' ? 10 : difficulty === 'MEDIUM' ? 20 : 30},
-  "content": "What will be the output of the following code?",
-  "starter_code": "const x = 5;\\nconsole.log(x + '5');",
-  "options": [
-    {"label": "A", "text": "55"},
-    {"label": "B", "text": "10"},
-    {"label": "C", "text": "NaN"},
-    {"label": "D", "text": "Error"}
-  ],
-  "correct_option": <0|1|2|3>,
-  "explanation": "Detailed explanation of why this is the correct output"
+function isAdmin(chatId) {
+  return String(chatId) === String(ADMIN_CHAT_ID);
 }
-RULES FOR WRITE_CODE:
-- correct_option is INTEGER 0-3
-- Code must be valid JS with a definite output
-- Keep code 3-8 lines max
-- Include tricky JS behaviors (hoisting, closures, type coercion, scope, etc.)
-- Wrong options should be common misconceptions
-- Do NOT include backticks inside starter_code strings
-`;
-    }
 
-    if (explainCount > 0) {
-      prompt += `
-Generate ${explainCount} EXPLAIN_ME (written explanation) questions. Each EXPLAIN_ME object must have:
-{
-  "type": "EXPLAIN_ME",
-  "title": "Short descriptive title",
-  "topic": "${topic}",
-  "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "conceptual", "${difficulty.toLowerCase()}"],
-  "points": ${difficulty === 'EASY' ? 10 : difficulty === 'MEDIUM' ? 15 : 25},
-  "content": "The question asking for an explanation",
-  "model_answer": "A comprehensive model answer (3-5 sentences minimum)",
-  "explanation": "Additional notes or grading criteria"
-}
-`;
-    }
-
-    prompt += `
-CRITICAL RULES:
-1. Return ONLY the JSON array. No markdown, no backticks, no extra text.
-2. All strings must be properly escaped (especially quotes and newlines).
-3. The array must contain exactly ${totalQuestions} objects.
-4. correct_option must be an integer 0-3, NOT a string.
-5. Every question must have ALL specified fields.
-6. Make sure the entire JSON array is complete and properly closed with ].
-7. Each question must be unique.
-8. Keep code snippets SHORT (3-8 lines) to save space.
-`;
-
-    return prompt;
+// /start
+bot.onText(/\/start/, (msg) => {
+  if (!isAdmin(msg.chat.id)) {
+    return bot.sendMessage(msg.chat.id, '❌ Unauthorized. Your ID: ' + msg.chat.id);
   }
+  bot.sendMessage(msg.chat.id,
+    `🎓 *Exam Platform Bot*\n\n` +
+    `📊 /stats — Dashboard stats\n` +
+    `📝 /exams — List all exams\n` +
+    `👨‍🎓 /students — List students\n` +
+    `📋 /results — Recent results\n` +
+    `🤖 /createexam <topic> [count] — AI generate exam\n` +
+    `   Example: /createexam JavaScript Basics 10\n` +
+    `   Default: 5 questions if no count given\n` +
+    `✅ /publishexam <id> — Publish exam\n` +
+    `📝 /unpublish <id> — Unpublish exam\n` +
+    `🗑 /deleteexam <id> — Delete exam\n` +
+    `❓ /examdetails <id> — View exam questions\n` +
+    `🏆 /leaderboard — Top students\n` +
+    `🆔 /chatid — Get your chat ID`,
+    { parse_mode: 'Markdown' }
+  );
+});
 
-  /**
-   * Call OpenRouter API with dynamic token limits
-   */
-  async callOpenRouter(prompt, questionCount) {
-    if (!this.apiKey || this.apiKey === 'your-key-here-from-openrouter') {
-      throw new Error('OpenRouter API key is not configured.');
-    }
+// /chatid
+bot.onText(/\/chatid/, (msg) => {
+  bot.sendMessage(msg.chat.id, `Your Chat ID: \`${msg.chat.id}\``, { parse_mode: 'Markdown' });
+});
 
-    // Dynamic token limit: more questions = more tokens
-    var tokensPerQuestion = 350;
-    var baseTokens = 500;
-    var maxTokens = Math.min(baseTokens + (questionCount || 10) * tokensPerQuestion, 8000);
-    console.log('[AI] Using max_tokens:', maxTokens, 'for', questionCount, 'questions');
+// /stats
+bot.onText(/\/stats/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const users = await db.query('SELECT COUNT(*) FROM users WHERE role = \$1', ['STUDENT']);
+    const exams = await db.query('SELECT COUNT(*) FROM exams');
+    const published = await db.query('SELECT COUNT(*) FROM exams WHERE status = \$1', ['PUBLISHED']);
+    const attempts = await db.query('SELECT COUNT(*) FROM attempts WHERE status = \$1', ['COMPLETED']);
+    const questions = await db.query('SELECT COUNT(*) FROM questions');
 
-    try {
-      const response = await axios.post(
-        `${this.baseUrl}/chat/completions`,
-        {
-          model: this.model,
-          messages: [
-            { role: 'system', content: 'You are a JSON generator. You ONLY output valid JSON arrays. Never include markdown. Make sure ALL JSON is complete and properly closed with ].' },
-            { role: 'user', content: prompt },
-          ],
-          temperature: 0.7,
-          max_tokens: maxTokens,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'http://localhost:3000',
-            'X-Title': 'JS Exam Platform',
-          },
-          timeout: 90000,
-        }
-      );
+    const avgScore = await db.query(
+      `SELECT ROUND(AVG(CASE WHEN max_score > 0 THEN (score::float / max_score) * 100 ELSE 0 END)) as avg
+       FROM attempts WHERE status = 'COMPLETED'`
+    );
+    const avg = avgScore.rows[0].avg || 0;
 
-      const content = response.data?.choices?.[0]?.message?.content;
-      if (!content) throw new Error('Empty response from AI model');
+    const passRate = await db.query(
+      `SELECT ROUND(AVG(CASE WHEN passed THEN 100 ELSE 0 END)) as rate
+       FROM attempts WHERE status = 'COMPLETED'`
+    );
+    const rate = passRate.rows[0].rate || 0;
 
-      var finishReason = response.data?.choices?.[0]?.finish_reason;
-      if (finishReason === 'length') {
-        console.warn('[AI] WARNING: Response was truncated (hit token limit). Will attempt JSON repair.');
-      }
-
-      return content;
-    } catch (error) {
-      if (error.response) {
-        const status = error.response.status;
-        const msg = error.response.data?.error?.message || error.message;
-        if (status === 401) throw new Error('Invalid OpenRouter API key');
-        if (status === 429) throw new Error('Rate limit exceeded. Wait a moment and try again.');
-        if (status === 402) throw new Error('Insufficient credits on OpenRouter account');
-        throw new Error(`OpenRouter API error (${status}): ${msg}`);
-      }
-      if (error.code === 'ECONNABORTED') {
-        throw new Error('AI request timed out. Try generating fewer questions.');
-      }
-      throw error;
-    }
+    bot.sendMessage(msg.chat.id,
+      `📊 *Dashboard Stats*\n\n` +
+      `👨‍🎓 Students: ${users.rows[0].count}\n` +
+      `📝 Total Exams: ${exams.rows[0].count}\n` +
+      `✅ Published: ${published.rows[0].count}\n` +
+      `📋 Completed Attempts: ${attempts.rows[0].count}\n` +
+      `❓ Questions in Bank: ${questions.rows[0].count}\n` +
+      `🎯 Avg Score: ${avg}%\n` +
+      `✅ Pass Rate: ${rate}%`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
   }
+});
 
-  /**
-   * Repair truncated JSON — recovers as many complete questions as possible
-   */
-  repairJSON(text) {
-    var cleaned = text.trim();
-
-    // Remove markdown fences
-    if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7);
-    else if (cleaned.startsWith('```')) cleaned = cleaned.slice(3);
-    if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3);
-    cleaned = cleaned.trim();
-
-    // Find array start
-    var firstBracket = cleaned.indexOf('[');
-    if (firstBracket === -1) throw new Error('No JSON array found in response');
-    cleaned = cleaned.slice(firstBracket);
-
-    // Try parsing as-is first
-    try {
-      var parsed = JSON.parse(cleaned);
-      if (Array.isArray(parsed)) return parsed;
-    } catch (e) {
-      // Continue to repair
+// /exams
+bot.onText(/\/exams$/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const result = await db.query('SELECT id, title, status, total_questions FROM exams ORDER BY created_at DESC LIMIT 10');
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '📝 No exams found');
     }
-
-    // Repair: find the last complete object in the array
-    console.log('[AI] Attempting JSON repair...');
-    var depth = 0;
-    var inString = false;
-    var escape = false;
-    var lastCompleteObjEnd = -1;
-
-    for (var i = 0; i < cleaned.length; i++) {
-      var ch = cleaned[i];
-
-      if (escape) { escape = false; continue; }
-      if (ch === '\\' && inString) { escape = true; continue; }
-      if (ch === '"') { inString = !inString; continue; }
-      if (inString) continue;
-
-      if (ch === '{' || ch === '[') {
-        depth++;
-      } else if (ch === '}' || ch === ']') {
-        depth--;
-        if (depth === 1 && ch === '}') {
-          lastCompleteObjEnd = i;
-        }
-      }
-    }
-
-    if (lastCompleteObjEnd > 0) {
-      var repaired = cleaned.slice(0, lastCompleteObjEnd + 1) + ']';
-      repaired = repaired.replace(/,\s*\]$/, ']');
-
-      try {
-        var parsed = JSON.parse(repaired);
-        if (Array.isArray(parsed)) {
-          console.log('[AI] JSON repair successful! Recovered ' + parsed.length + ' questions.');
-          return parsed;
-        }
-      } catch (e2) {
-        console.error('[AI] JSON repair also failed:', e2.message);
-      }
-    }
-
-    throw new Error('Failed to parse AI response as JSON. Try generating fewer questions (max 10-12).');
-  }
-
-  /**
-   * Parse JSON from AI response
-   */
-  parseJSON(raw) {
-    return this.repairJSON(raw);
-  }
-
-  /**
-   * Validate & sanitize each generated question
-   */
-  validateQuestions(questions) {
-    return questions.map((q, index) => {
-      if (!q.type || !['MCQ', 'WRITE_CODE', 'EXPLAIN_ME'].includes(q.type)) {
-        throw new Error(`Question ${index + 1}: invalid or missing type "${q.type}"`);
-      }
-      if (!q.content || q.content.trim().length === 0) {
-        throw new Error(`Question ${index + 1}: missing content`);
-      }
-
-      const base = {
-        type: q.type,
-        title: q.title || `Question ${index + 1}`,
-        topic: q.topic || 'General',
-        difficulty: q.difficulty || 'MEDIUM',
-        tags: Array.isArray(q.tags) ? q.tags : [],
-        points: typeof q.points === 'number' ? q.points : 10,
-        content: q.content,
-        explanation: q.explanation || '',
-      };
-
-      if (q.type === 'MCQ') {
-        if (!Array.isArray(q.options) || q.options.length !== 4) {
-          throw new Error(`Question ${index + 1} (MCQ): must have exactly 4 options`);
-        }
-        const options = q.options.map((opt, i) => {
-          const labels = ['A', 'B', 'C', 'D'];
-          if (typeof opt === 'string') return { label: labels[i], text: opt };
-          return { label: opt.label || labels[i], text: opt.text || String(opt) };
-        });
-        let correctOption = q.correct_option;
-        if (typeof correctOption === 'string') correctOption = parseInt(correctOption, 10);
-        if (typeof correctOption !== 'number' || correctOption < 0 || correctOption > 3) correctOption = 0;
-        return { ...base, options, correct_option: correctOption };
-      }
-
-      if (q.type === 'WRITE_CODE') {
-        if (!Array.isArray(q.options) || q.options.length !== 4) {
-          throw new Error(`Question ${index + 1} (WRITE_CODE): must have exactly 4 options`);
-        }
-        const options = q.options.map((opt, i) => {
-          const labels = ['A', 'B', 'C', 'D'];
-          if (typeof opt === 'string') return { label: labels[i], text: opt };
-          return { label: opt.label || labels[i], text: opt.text || String(opt) };
-        });
-        let correctOption = q.correct_option;
-        if (typeof correctOption === 'string') correctOption = parseInt(correctOption, 10);
-        if (typeof correctOption !== 'number' || correctOption < 0 || correctOption > 3) correctOption = 0;
-
-        return {
-          ...base,
-          options,
-          correct_option: correctOption,
-          starter_code: q.starter_code || '',
-          expected_output: q.expected_output || '',
-          test_cases: Array.isArray(q.test_cases) ? q.test_cases : [],
-          model_answer: q.model_answer || '',
-        };
-      }
-
-      if (q.type === 'EXPLAIN_ME') {
-        return { ...base, model_answer: q.model_answer || '' };
-      }
-
-      return base;
+    let text = '📝 *Exams:*\n\n';
+    result.rows.forEach((exam, i) => {
+      const shortId = exam.id.substring(0, 8);
+      const icon = exam.status === 'PUBLISHED' ? '✅' : '📝';
+      text += `${i + 1}. ${icon} ${exam.title}\n   Status: ${exam.status} | Qs: ${exam.total_questions}\n   ID: \`${shortId}\`\n\n`;
     });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
   }
+});
 
-  /**
-   * Main entry: generate questions
-   */
-  async generateQuestions({ topic, difficulty, mcqCount, codeCount, explainCount }) {
-    var totalQuestions = (mcqCount || 0) + (codeCount || 0) + (explainCount || 0);
-    console.log(`[AI] Generating questions: topic=${topic}, difficulty=${difficulty}, MCQ=${mcqCount}, CODE=${codeCount}, EXPLAIN=${explainCount}, TOTAL=${totalQuestions}`);
+// /students
+bot.onText(/\/students/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const result = await db.query(
+      'SELECT name, email, total_attempts FROM users WHERE role = \$1 ORDER BY joined_at DESC LIMIT 20',
+      ['STUDENT']
+    );
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '👨‍🎓 No students found');
+    }
+    let text = '👨‍🎓 *Students:*\n\n';
+    result.rows.forEach((s, i) => {
+      text += `${i + 1}. ${s.name}\n   📧 ${s.email}\n   📋 ${s.total_attempts} attempts\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
 
-    if (totalQuestions > 15) {
-      console.warn('[AI] Warning: More than 15 questions may cause truncation. Consider reducing count.');
+// /results
+bot.onText(/\/results/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const result = await db.query(`
+      SELECT a.exam_title, u.name, a.score, a.max_score, a.passed, a.submitted_at
+      FROM attempts a JOIN users u ON a.user_id = u.id
+      WHERE a.status = 'COMPLETED'
+      ORDER BY a.submitted_at DESC LIMIT 10
+    `);
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '📊 No results yet');
+    }
+    let text = '📊 *Recent Results:*\n\n';
+    result.rows.forEach((r, i) => {
+      const icon = r.passed ? '✅' : '❌';
+      const pct = r.max_score > 0 ? Math.round((r.score / r.max_score) * 100) : 0;
+      text += `${i + 1}. ${r.name}\n   📝 ${r.exam_title}\n   🎯 ${r.score}/${r.max_score} (${pct}%) ${icon}\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /leaderboard
+bot.onText(/\/leaderboard/, async (msg) => {
+  if (!isAdmin(msg.chat.id)) return;
+  try {
+    const result = await db.query(`
+      SELECT u.name, u.email,
+        COUNT(a.id) as total_exams,
+        ROUND(AVG(CASE WHEN a.max_score > 0 THEN (a.score::float / a.max_score) * 100 ELSE 0 END)) as avg_score,
+        SUM(CASE WHEN a.passed THEN 1 ELSE 0 END) as passed_count
+      FROM users u
+      JOIN attempts a ON u.id = a.user_id
+      WHERE a.status = 'COMPLETED' AND u.role = 'STUDENT'
+      GROUP BY u.id, u.name, u.email
+      ORDER BY avg_score DESC
+      LIMIT 10
+    `);
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '🏆 No results yet');
+    }
+    let text = '🏆 *Leaderboard (Top Students):*\n\n';
+    const medals = ['🥇', '🥈', '🥉'];
+    result.rows.forEach((s, i) => {
+      const medal = medals[i] || `${i + 1}.`;
+      text += `${medal} *${s.name}*\n   📧 ${s.email}\n   🎯 Avg: ${s.avg_score}% | Exams: ${s.total_exams} | Passed: ${s.passed_count}\n\n`;
+    });
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /publishexam <id>
+bot.onText(/\/publishexam (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    const result = await db.query(
+      'UPDATE exams SET status = \$1, updated_at = NOW() WHERE id::text LIKE \$2 RETURNING title, id, total_questions',
+      ['PUBLISHED', searchId + '%']
+    );
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found with ID: ' + searchId);
+    }
+    bot.sendMessage(msg.chat.id,
+      `✅ *Published!*\n\n📝 ${result.rows[0].title}\n❓ ${result.rows[0].total_questions} questions\n🔗 Students can now see this exam`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /unpublish <id>
+bot.onText(/\/unpublish (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    const result = await db.query(
+      'UPDATE exams SET status = \$1, updated_at = NOW() WHERE id::text LIKE \$2 RETURNING title',
+      ['DRAFT', searchId + '%']
+    );
+    if (result.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found');
+    }
+    bot.sendMessage(msg.chat.id, `📝 *Unpublished:* ${result.rows[0].title}`, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /deleteexam <id>
+bot.onText(/\/deleteexam (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    const exam = await db.query('SELECT id, title, question_ids FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
+    if (exam.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found with ID: ' + searchId);
     }
 
-    const prompt = this.buildPrompt({ topic, difficulty, mcqCount: mcqCount || 0, codeCount: codeCount || 0, explainCount: explainCount || 0 });
-    const rawResponse = await this.callOpenRouter(prompt, totalQuestions);
-    console.log('[AI] Received response, parsing JSON...');
+    const examId = exam.rows[0].id;
+    const title = exam.rows[0].title;
 
-    const parsed = this.parseJSON(rawResponse);
-    console.log(`[AI] Parsed ${parsed.length} questions, validating...`);
+    await db.query('DELETE FROM attempts WHERE exam_id = \$1', [examId]);
+    await db.query('DELETE FROM exams WHERE id = \$1', [examId]);
 
-    const validated = this.validateQuestions(parsed);
-    console.log(`[AI] Validated ${validated.length} questions`);
-
-    return validated;
+    bot.sendMessage(msg.chat.id, `🗑 *Deleted:* ${title}\n(Attempts also removed)`, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
   }
-}
+});
 
-module.exports = new AIService();
+// /examdetails <id>
+bot.onText(/\/examdetails (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+  const searchId = match[1].trim();
+  try {
+    const exam = await db.query('SELECT * FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
+    if (exam.rows.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ Exam not found');
+    }
+    const e = exam.rows[0];
+    const qIds = e.question_ids || [];
+
+    let text = `📝 *${e.title}*\n\n` +
+      `📋 Status: ${e.status}\n` +
+      `❓ Questions: ${e.total_questions}\n` +
+      `⏱ Time: ${Math.round(e.time_limit_secs / 60)} min\n` +
+      `🎯 Pass: ${e.passing_score}%\n` +
+      `📊 Attempts: ${e.total_attempts}\n\n`;
+
+    if (qIds.length > 0) {
+      const questions = await db.query('SELECT type, title, difficulty, content FROM questions WHERE id = ANY(\$1)', [qIds]);
+      text += `*Questions:*\n\n`;
+      questions.rows.forEach((q, i) => {
+        const typeIcon = q.type === 'MCQ' ? '🔵' : q.type === 'WRITE_CODE' ? '🟡' : '🟢';
+        const preview = (q.title || q.content || '').substring(0, 60);
+        text += `${i + 1}. ${typeIcon} [${q.type}] ${q.difficulty}\n   ${preview}...\n\n`;
+      });
+    } else {
+      text += '⚠️ No questions linked';
+    }
+
+    bot.sendMessage(msg.chat.id, text, { parse_mode: 'Markdown' });
+  } catch (err) {
+    bot.sendMessage(msg.chat.id, '❌ Error: ' + err.message);
+  }
+});
+
+// /createexam <topic> [count]
+bot.onText(/\/createexam (.+)/, async (msg, match) => {
+  if (!isAdmin(msg.chat.id)) return;
+
+  const input = match[1].trim();
+
+  // Parse count from end of input (last word if it's a number)
+  let topic = input;
+  let count = 5; // default
+  const words = input.split(/\s+/);
+  const lastWord = words[words.length - 1];
+
+  if (/^\d+$/.test(lastWord)) {
+    count = Math.min(Math.max(parseInt(lastWord), 1), 20); // clamp 1-20
+    topic = words.slice(0, -1).join(' ');
+  }
+
+  // Remove trailing "questions" or "qs" word
+  topic = topic.replace(/\s+(questions?|qs)$/i, '').trim();
+
+  if (!topic) {
+    return bot.sendMessage(msg.chat.id, '❌ Please provide a topic.\nExample: `/createexam JavaScript Basics 10`', { parse_mode: 'Markdown' });
+  }
+
+  // Split count across question types: 50% MCQ, 30% CODE, 20% EXPLAIN
+  const mcqCount = Math.max(1, Math.round(count * 0.5));
+  const codeCount = Math.max(1, Math.round(count * 0.3));
+  const explainCount = Math.max(0, count - mcqCount - codeCount);
+
+  bot.sendMessage(msg.chat.id,
+    `🤖 Generating exam on *"${topic}"*...\n` +
+    `❓ ${count} questions (MCQ: ${mcqCount}, Code: ${codeCount}, Explain: ${explainCount})\n` +
+    `⏳ This takes 30-60 seconds`,
+    { parse_mode: 'Markdown' }
+  );
+
+  try {
+    const aiService = require('../services/aiService');
+
+    const questions = await aiService.generateQuestions({
+      topic: topic,
+      difficulty: 'MEDIUM',
+      mcqCount: mcqCount,
+      codeCount: codeCount,
+      explainCount: explainCount
+    });
+
+    console.log(`[Telegram] AI returned ${questions.length} questions`);
+
+    if (!questions || questions.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ AI returned no questions. Try again or use a different topic.');
+    }
+
+    const questionIds = [];
+    let inserted = 0;
+    let failed = 0;
+
+    for (const q of questions) {
+      try {
+        const result = await db.query(
+          `INSERT INTO questions (type, title, topic, difficulty, content, options, correct_option, explanation, model_answer, starter_code, expected_output, points)
+           VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7, \$8, \$9, \$10, \$11, \$12) RETURNING id`,
+          [
+            q.type || 'MCQ',
+            q.title || (q.content || '').substring(0, 100),
+            topic,
+            q.difficulty || 'MEDIUM',
+            q.content || '',
+            JSON.stringify(q.options || []),
+            q.correct_option != null ? q.correct_option : null,
+            q.explanation || '',
+            q.model_answer || '',
+            q.starter_code || '',
+            q.expected_output || '',
+            q.points || 10
+          ]
+        );
+        questionIds.push(result.rows[0].id);
+        inserted++;
+      } catch (insertErr) {
+        console.error(`[Telegram] Failed to insert question:`, insertErr.message);
+        failed++;
+      }
+    }
+
+    console.log(`[Telegram] Inserted ${inserted} questions, failed ${failed}`);
+
+    if (questionIds.length === 0) {
+      return bot.sendMessage(msg.chat.id, '❌ AI generated questions but all failed to save. Check logs.');
+    }
+
+    // Calculate time limit: 2 min per question, minimum 10 min
+    const timePerQ = 2 * 60;
+    const timeLimitSecs = Math.max(questionIds.length * timePerQ, 600);
+
+    const examResult = await db.query(
+      `INSERT INTO exams (title, description, status, time_limit_secs, total_questions, passing_score, question_ids)
+       VALUES (\$1, \$2, \$3, \$4, \$5, \$6, \$7) RETURNING id, title`,
+      [
+        `${topic} Exam`,
+        `AI-generated exam on ${topic} with ${questionIds.length} questions`,
+        'DRAFT',
+        timeLimitSecs,
+        questionIds.length,
+        60,
+        JSON.stringify(questionIds)
+      ]
+    );
+
+    const shortId = examResult.rows[0].id.substring(0, 8);
+    const timeMin = Math.round(timeLimitSecs / 60);
+
+    // Count question types
+    const typeCounts = {};
+    questions.forEach(q => {
+      const t = q.type || 'MCQ';
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    });
+    const typeStr = Object.entries(typeCounts).map(([k, v]) => `${k}: ${v}`).join(', ');
+
+    let resultMsg =
+      `✅ *Exam Created!*\n\n` +
+      `📝 ${examResult.rows[0].title}\n` +
+      `❓ ${questionIds.length} questions\n` +
+      `📊 Types: ${typeStr}\n` +
+      `⏱ ${timeMin} minutes\n` +
+      `🎯 Pass: 60%\n` +
+      `📋 Status: DRAFT\n` +
+      `🆔 ID: \`${shortId}\`\n\n` +
+      `To publish: /publishexam ${shortId}\n` +
+      `To view: /examdetails ${shortId}\n` +
+      `To delete: /deleteexam ${shortId}`;
+
+    if (failed > 0) {
+      resultMsg += `\n\n⚠️ ${failed} questions failed to save`;
+    }
+
+    bot.sendMessage(msg.chat.id, resultMsg, { parse_mode: 'Markdown' });
+  } catch (err) {
+    console.error('[Telegram] createexam error:', err);
+    bot.sendMessage(msg.chat.id, '❌ Failed: ' + err.message);
+  }
+});
+
+module.exports = bot;
