@@ -18,7 +18,7 @@ class AIService {
         return { score: 0, feedback: 'Answer is too short or empty to evaluate.' };
       }
 
-      var prompt = `You are a fair exam grader for a JavaScript programming course.
+      var prompt = `You are a fair exam grader for a programming course.
 
 QUESTION:
 ${question.content}
@@ -101,12 +101,17 @@ Respond in EXACTLY this JSON format (no extra text):
   /**
    * Build the prompt for question generation
    */
-  buildPrompt({ topic, difficulty, mcqCount, codeCount, explainCount }) {
+  buildPrompt({ topic, difficulty, mcqCount, codeCount, explainCount, language }) {
     const totalQuestions = (mcqCount || 0) + (codeCount || 0) + (explainCount || 0);
 
-    let prompt = `You are an expert exam question generator for a JavaScript/programming exam platform.
+    // Determine language for prompt
+    const lang = language || 'JavaScript';
+    const langUpper = lang.charAt(0).toUpperCase() + lang.slice(1).toLowerCase();
+
+    let prompt = `You are an expert exam question generator for a ${langUpper} programming exam platform.
 
 Generate exactly ${totalQuestions} questions about "${topic}" at ${difficulty} difficulty level.
+All code examples and programming questions MUST be written in ${langUpper}.
 
 Return ONLY a valid JSON array (no markdown, no explanation, no code fences). Each element must be an object.
 
@@ -114,13 +119,13 @@ Return ONLY a valid JSON array (no markdown, no explanation, no code fences). Ea
 
     if (mcqCount > 0) {
       prompt += `
-Generate ${mcqCount} MCQ (multiple-choice) questions about concepts/theory. Each MCQ object must have:
+Generate ${mcqCount} MCQ (multiple-choice) questions about ${langUpper} concepts/theory. Each MCQ object must have:
 {
   "type": "MCQ",
   "title": "Short question title",
   "topic": "${topic}",
   "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "${difficulty.toLowerCase()}"],
+  "tags": ["${topic.toLowerCase()}", "${langUpper.toLowerCase()}", "${difficulty.toLowerCase()}"],
   "points": ${difficulty === 'EASY' ? 5 : difficulty === 'MEDIUM' ? 10 : 15},
   "content": "The full question text",
   "options": [
@@ -138,7 +143,7 @@ IMPORTANT: correct_option is a 0-based INTEGER index (0=A, 1=B, 2=C, 3=D).
 
     if (codeCount > 0) {
       prompt += `
-Generate ${codeCount} WRITE_CODE (output prediction) questions. Show a JavaScript code snippet and ask "What will be the output?". Student picks from 4 options.
+Generate ${codeCount} WRITE_CODE (output prediction) questions. Show a ${langUpper} code snippet and ask "What will be the output?". Student picks from 4 options.
 
 Each WRITE_CODE object must have:
 {
@@ -146,24 +151,24 @@ Each WRITE_CODE object must have:
   "title": "Short title about the concept tested",
   "topic": "${topic}",
   "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "coding", "${difficulty.toLowerCase()}"],
+  "tags": ["${topic.toLowerCase()}", "coding", "${langUpper.toLowerCase()}", "${difficulty.toLowerCase()}"],
   "points": ${difficulty === 'EASY' ? 10 : difficulty === 'MEDIUM' ? 20 : 30},
-  "content": "What will be the output of the following code?",
-  "starter_code": "const x = 5;\\nconsole.log(x + '5');",
+  "content": "What will be the output of the following ${langUpper} code?",
+  "starter_code": "// ${langUpper} code here\\n...",
   "options": [
-    {"label": "A", "text": "55"},
-    {"label": "B", "text": "10"},
-    {"label": "C", "text": "NaN"},
-    {"label": "D", "text": "Error"}
+    {"label": "A", "text": "output1"},
+    {"label": "B", "text": "output2"},
+    {"label": "C", "text": "output3"},
+    {"label": "D", "text": "output4"}
   ],
   "correct_option": <0|1|2|3>,
   "explanation": "Detailed explanation of why this is the correct output"
 }
 RULES FOR WRITE_CODE:
 - correct_option is INTEGER 0-3
-- Code must be valid JS with a definite output
+- Code must be valid ${langUpper} with a definite output
 - Keep code 3-8 lines max
-- Include tricky JS behaviors (hoisting, closures, type coercion, scope, etc.)
+- Include tricky ${langUpper} behaviors and common pitfalls
 - Wrong options should be common misconceptions
 - Do NOT include backticks inside starter_code strings
 `;
@@ -171,15 +176,15 @@ RULES FOR WRITE_CODE:
 
     if (explainCount > 0) {
       prompt += `
-Generate ${explainCount} EXPLAIN_ME (written explanation) questions. Each EXPLAIN_ME object must have:
+Generate ${explainCount} EXPLAIN_ME (written explanation) questions about ${langUpper}. Each EXPLAIN_ME object must have:
 {
   "type": "EXPLAIN_ME",
   "title": "Short descriptive title",
   "topic": "${topic}",
   "difficulty": "${difficulty}",
-  "tags": ["${topic.toLowerCase()}", "conceptual", "${difficulty.toLowerCase()}"],
+  "tags": ["${topic.toLowerCase()}", "conceptual", "${langUpper.toLowerCase()}", "${difficulty.toLowerCase()}"],
   "points": ${difficulty === 'EASY' ? 10 : difficulty === 'MEDIUM' ? 15 : 25},
-  "content": "The question asking for an explanation",
+  "content": "The question asking for an explanation about a ${langUpper} concept",
   "model_answer": "A comprehensive model answer (3-5 sentences minimum)",
   "explanation": "Additional notes or grading criteria"
 }
@@ -196,6 +201,7 @@ CRITICAL RULES:
 6. Make sure the entire JSON array is complete and properly closed with ].
 7. Each question must be unique.
 8. Keep code snippets SHORT (3-8 lines) to save space.
+9. ALL code and examples must be in ${langUpper}.
 `;
 
     return prompt;
@@ -411,15 +417,24 @@ CRITICAL RULES:
   /**
    * Main entry: generate questions
    */
-  async generateQuestions({ topic, difficulty, mcqCount, codeCount, explainCount }) {
+  async generateQuestions({ topic, difficulty, mcqCount, codeCount, explainCount, language }) {
     var totalQuestions = (mcqCount || 0) + (codeCount || 0) + (explainCount || 0);
-    console.log(`[AI] Generating questions: topic=${topic}, difficulty=${difficulty}, MCQ=${mcqCount}, CODE=${codeCount}, EXPLAIN=${explainCount}, TOTAL=${totalQuestions}`);
+    const lang = language || 'JavaScript';
+    console.log(`[AI] Generating questions: topic=${topic}, lang=${lang}, difficulty=${difficulty}, MCQ=${mcqCount}, CODE=${codeCount}, EXPLAIN=${explainCount}, TOTAL=${totalQuestions}`);
 
     if (totalQuestions > 15) {
       console.warn('[AI] Warning: More than 15 questions may cause truncation. Consider reducing count.');
     }
 
-    const prompt = this.buildPrompt({ topic, difficulty, mcqCount: mcqCount || 0, codeCount: codeCount || 0, explainCount: explainCount || 0 });
+    const prompt = this.buildPrompt({
+      topic,
+      difficulty,
+      mcqCount: mcqCount || 0,
+      codeCount: codeCount || 0,
+      explainCount: explainCount || 0,
+      language: lang
+    });
+
     const rawResponse = await this.callOpenRouter(prompt, totalQuestions);
     console.log('[AI] Received response, parsing JSON...');
 
