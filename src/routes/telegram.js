@@ -3,15 +3,17 @@ const db = require('../db');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
+const BACKEND_URL = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '';
 
 if (!TELEGRAM_TOKEN) {
   console.log('No Telegram token found, bot disabled');
-  module.exports = null;
+  module.exports = { setupWebhook: () => {} };
   return;
 }
 
-const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: true });
-console.log('Telegram bot started');
+// Create bot WITHOUT polling
+const bot = new TelegramBot(TELEGRAM_TOKEN);
+console.log('Telegram bot initialized (webhook mode)');
 
 function isAdmin(chatId) {
   return String(chatId) === String(ADMIN_CHAT_ID);
@@ -56,14 +58,12 @@ bot.onText(/\/stats/, async (msg) => {
     const attempts = await db.query('SELECT COUNT(*) FROM attempts WHERE status = \$1', ['COMPLETED']);
     const questions = await db.query('SELECT COUNT(*) FROM questions');
 
-    // Average score
     const avgScore = await db.query(
       `SELECT ROUND(AVG(CASE WHEN max_score > 0 THEN (score::float / max_score) * 100 ELSE 0 END)) as avg
        FROM attempts WHERE status = 'COMPLETED'`
     );
     const avg = avgScore.rows[0].avg || 0;
 
-    // Pass rate
     const passRate = await db.query(
       `SELECT ROUND(AVG(CASE WHEN passed THEN 100 ELSE 0 END)) as rate
        FROM attempts WHERE status = 'COMPLETED'`
@@ -227,8 +227,7 @@ bot.onText(/\/deleteexam (.+)/, async (msg, match) => {
   if (!isAdmin(msg.chat.id)) return;
   const searchId = match[1].trim();
   try {
-    // First get exam info
-    const exam = await db.query('SELECT id, title, question_ids FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
+    const exam = await db.query('SELECT id, title FROM exams WHERE id::text LIKE \$1', [searchId + '%']);
     if (exam.rows.length === 0) {
       return bot.sendMessage(msg.chat.id, '❌ Exam not found with ID: ' + searchId);
     }
@@ -236,9 +235,7 @@ bot.onText(/\/deleteexam (.+)/, async (msg, match) => {
     const examId = exam.rows[0].id;
     const title = exam.rows[0].title;
 
-    // Delete attempts for this exam
     await db.query('DELETE FROM attempts WHERE exam_id = \$1', [examId]);
-    // Delete the exam
     await db.query('DELETE FROM exams WHERE id = \$1', [examId]);
 
     bot.sendMessage(msg.chat.id, `🗑 *Deleted:* ${title}\n(Attempts also removed)`, { parse_mode: 'Markdown' });
@@ -285,46 +282,48 @@ bot.onText(/\/examdetails (.+)/, async (msg, match) => {
 });
 
 // /createexam <topic> [count]
-// Examples: /createexam JavaScript Basics
-//           /createexam JavaScript Basics 10
-//           /createexam Python OOP 15
 bot.onText(/\/createexam (.+)/, async (msg, match) => {
   if (!isAdmin(msg.chat.id)) return;
 
   const input = match[1].trim();
 
-  // Parse count from end of input (last word if it's a number)
   let topic = input;
-  let count = 5; // default
+  let count = 5;
   const words = input.split(/\s+/);
   const lastWord = words[words.length - 1];
 
   if (/^\d+$/.test(lastWord)) {
-    count = Math.min(Math.max(parseInt(lastWord), 1), 20); // clamp 1-20
+    count = Math.min(Math.max(parseInt(lastWord), 1), 20);
     topic = words.slice(0, -1).join(' ');
   }
 
-  // Also remove trailing "questions" or "qs" word
   topic = topic.replace(/\s+(questions?|qs)$/i, '').trim();
 
   if (!topic) {
     return bot.sendMessage(msg.chat.id, '❌ Please provide a topic.\nExample: `/createexam JavaScript Basics 10`', { parse_mode: 'Markdown' });
   }
 
+  // Split count across question types: 50% MCQ, 30% CODE, 20% EXPLAIN
+  const mcqCount = Math.max(1, Math.round(count * 0.5));
+  const codeCount = Math.max(1, Math.round(count * 0.3));
+  const explainCount = Math.max(0, count - mcqCount - codeCount);
+
   bot.sendMessage(msg.chat.id,
     `🤖 Generating exam on *"${topic}"*...\n` +
-    `❓ ${count} questions\n` +
+    `❓ ${count} questions (MCQ: ${mcqCount}, Code: ${codeCount}, Explain: ${explainCount})\n` +
     `⏳ This takes 30-60 seconds`,
     { parse_mode: 'Markdown' }
   );
 
   try {
     const aiService = require('../services/aiService');
+
     const questions = await aiService.generateQuestions({
       topic: topic,
-      count: count,
-      difficulty: 'MIXED',
-      types: ['MCQ', 'WRITE_CODE', 'EXPLAIN_ME']
+      difficulty: 'MEDIUM',
+      mcqCount: mcqCount,
+      codeCount: codeCount,
+      explainCount: explainCount
     });
 
     console.log(`[Telegram] AI returned ${questions.length} questions`);
@@ -371,9 +370,8 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
       return bot.sendMessage(msg.chat.id, '❌ AI generated questions but all failed to save. Check logs.');
     }
 
-    // Calculate time limit: 2 min per MCQ, 3 min per code/explain
-    const timePerQ = 2 * 60; // 2 minutes per question
-    const timeLimitSecs = Math.max(questionIds.length * timePerQ, 600); // minimum 10 min
+    const timePerQ = 2 * 60;
+    const timeLimitSecs = Math.max(questionIds.length * timePerQ, 600);
 
     const examResult = await db.query(
       `INSERT INTO exams (title, description, status, time_limit_secs, total_questions, passing_score, question_ids)
@@ -392,7 +390,6 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
     const shortId = examResult.rows[0].id.substring(0, 8);
     const timeMin = Math.round(timeLimitSecs / 60);
 
-    // Count question types
     const typeCounts = {};
     questions.forEach(q => {
       const t = q.type || 'MCQ';
@@ -424,4 +421,22 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
   }
 });
 
-module.exports = bot;
+// Setup webhook route on Express app
+function setupWebhook(app) {
+  const webhookPath = `/api/telegram/webhook`;
+
+  app.post(webhookPath, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+  });
+
+  // Set webhook URL with Telegram
+  const backendUrl = process.env.BACKEND_URL || 'https://exam-platform-server.onrender.com';
+  const webhookUrl = `${backendUrl}${webhookPath}`;
+
+  bot.setWebHook(webhookUrl)
+    .then(() => console.log(`Telegram webhook set: ${webhookUrl}`))
+    .catch(err => console.error('Failed to set webhook:', err.message));
+}
+
+module.exports = { bot, setupWebhook };
