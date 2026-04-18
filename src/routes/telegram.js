@@ -1,9 +1,9 @@
 const TelegramBot = require('node-telegram-bot-api');
 const db = require('../db');
+const aiService = require('../services/aiService');
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
-const BACKEND_URL = process.env.RENDER_EXTERNAL_URL || process.env.BACKEND_URL || '';
 
 if (!TELEGRAM_TOKEN) {
   console.log('No Telegram token found, bot disabled');
@@ -316,7 +316,9 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
   );
 
   try {
-    const aiService = require('../services/aiService');
+    console.log('[Telegram] Calling aiService.generateQuestions...');
+    console.log('[Telegram] aiService type:', typeof aiService);
+    console.log('[Telegram] aiService methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(aiService)));
 
     const questions = await aiService.generateQuestions({
       topic: topic,
@@ -423,14 +425,13 @@ bot.onText(/\/createexam (.+)/, async (msg, match) => {
 
 // Setup webhook route on Express app
 function setupWebhook(app) {
-  const webhookPath = `/api/telegram/webhook`;
+  const webhookPath = '/api/telegram/webhook';
 
   app.post(webhookPath, (req, res) => {
     bot.processUpdate(req.body);
     res.sendStatus(200);
   });
 
-  // Set webhook URL with Telegram
   const backendUrl = process.env.BACKEND_URL || 'https://exam-platform-server.onrender.com';
   const webhookUrl = `${backendUrl}${webhookPath}`;
 
